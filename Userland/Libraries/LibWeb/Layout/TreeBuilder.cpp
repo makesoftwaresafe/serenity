@@ -42,9 +42,7 @@ TreeBuilder::TreeBuilder() = default;
 static bool has_inline_or_in_flow_block_children(Layout::Node const& layout_node)
 {
     for (auto child = layout_node.first_child(); child; child = child->next_sibling()) {
-        if (child->is_inline())
-            return true;
-        if (!child->is_floating() && !child->is_absolutely_positioned())
+        if (child->is_inline() || child->is_in_flow())
             return true;
     }
     return false;
@@ -57,7 +55,7 @@ static bool has_in_flow_block_children(Layout::Node const& layout_node)
     for (auto child = layout_node.first_child(); child; child = child->next_sibling()) {
         if (child->is_inline())
             continue;
-        if (!child->is_floating() && !child->is_absolutely_positioned())
+        if (child->is_in_flow())
             return true;
     }
     return false;
@@ -98,11 +96,10 @@ static Layout::Node& insertion_parent_for_block_node(Layout::NodeWithStyle& layo
         return layout_parent;
     }
 
-    bool is_out_of_flow = layout_node.is_absolutely_positioned() || layout_node.is_floating();
-
-    if (is_out_of_flow
+    if (layout_node.is_out_of_flow()
         && !layout_parent.display().is_flex_inside()
         && !layout_parent.display().is_grid_inside()
+        && !layout_parent.last_child()->is_generated()
         && layout_parent.last_child()->is_anonymous()
         && layout_parent.last_child()->children_are_inline()) {
         // Block is out-of-flow & previous sibling was wrapped in an anonymous block.
@@ -115,7 +112,7 @@ static Layout::Node& insertion_parent_for_block_node(Layout::NodeWithStyle& layo
         return layout_parent;
     }
 
-    if (is_out_of_flow) {
+    if (layout_node.is_out_of_flow()) {
         // Block is out-of-flow, it can have inline siblings if necessary.
         return layout_parent;
     }
@@ -128,7 +125,7 @@ static Layout::Node& insertion_parent_for_block_node(Layout::NodeWithStyle& layo
         for (JS::GCPtr<Layout::Node> child = layout_parent.first_child(); child; child = next) {
             next = child->next_sibling();
             // NOTE: We let out-of-flow children stay in the parent, to preserve tree structure.
-            if (child->is_floating() || child->is_absolutely_positioned())
+            if (child->is_out_of_flow())
                 continue;
             layout_parent.remove_child(*child);
             children.append(*child);
@@ -201,7 +198,7 @@ void TreeBuilder::create_pseudo_element_if_needed(DOM::Element& element, CSS::Se
         return;
 
     auto initial_quote_nesting_level = m_quote_nesting_level;
-    auto [pseudo_element_content, final_quote_nesting_level] = pseudo_element_style->content(initial_quote_nesting_level);
+    auto [pseudo_element_content, final_quote_nesting_level] = pseudo_element_style->content(element, initial_quote_nesting_level);
     m_quote_nesting_level = final_quote_nesting_level;
     auto pseudo_element_display = pseudo_element_style->display();
     // ::before and ::after only exist if they have content. `content: normal` computes to `none` for them.
@@ -337,9 +334,11 @@ void TreeBuilder::create_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
         element.clear_pseudo_element_nodes({});
         VERIFY(!element.needs_style_update());
         style = element.computed_css_values();
+        element.resolve_counters(*style);
         display = style->display();
         if (display.is_none())
             return;
+        // TODO: Implement changing element contents with the `content` property.
         if (context.layout_svg_mask_or_clip_path) {
             if (is<SVG::SVGMaskElement>(dom_node))
                 layout_node = document.heap().allocate_without_realm<Layout::SVGMaskBox>(document, static_cast<SVG::SVGMaskElement&>(dom_node), *style);
@@ -374,15 +373,23 @@ void TreeBuilder::create_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
 
     auto shadow_root = is<DOM::Element>(dom_node) ? verify_cast<DOM::Element>(dom_node).shadow_root() : nullptr;
 
+    auto element_has_content_visibility_hidden = [&dom_node]() {
+        if (is<DOM::Element>(dom_node)) {
+            auto& element = static_cast<DOM::Element&>(dom_node);
+            return element.computed_css_values()->content_visibility() == CSS::ContentVisibility::Hidden;
+        }
+        return false;
+    }();
+
     // Add node for the ::before pseudo-element.
-    if (is<DOM::Element>(dom_node) && layout_node->can_have_children()) {
+    if (is<DOM::Element>(dom_node) && layout_node->can_have_children() && !element_has_content_visibility_hidden) {
         auto& element = static_cast<DOM::Element&>(dom_node);
         push_parent(verify_cast<NodeWithStyle>(*layout_node));
         create_pseudo_element_if_needed(element, CSS::Selector::PseudoElement::Type::Before, AppendOrPrepend::Prepend);
         pop_parent();
     }
 
-    if ((dom_node.has_children() || shadow_root) && layout_node->can_have_children()) {
+    if ((dom_node.has_children() || shadow_root) && layout_node->can_have_children() && !element_has_content_visibility_hidden) {
         push_parent(verify_cast<NodeWithStyle>(*layout_node));
         if (shadow_root) {
             for (auto* node = shadow_root->first_child(); node; node = node->next_sibling()) {
@@ -414,7 +421,12 @@ void TreeBuilder::create_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
     }
 
     if (is<HTML::HTMLSlotElement>(dom_node)) {
-        auto slottables = static_cast<HTML::HTMLSlotElement&>(dom_node).assigned_nodes_internal();
+        auto& slot_element = static_cast<HTML::HTMLSlotElement&>(dom_node);
+
+        if (slot_element.computed_css_values()->content_visibility() == CSS::ContentVisibility::Hidden)
+            return;
+
+        auto slottables = slot_element.assigned_nodes_internal();
         push_parent(verify_cast<NodeWithStyle>(*layout_node));
 
         for (auto const& slottable : slottables)
@@ -502,7 +514,7 @@ void TreeBuilder::create_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
     }
 
     // Add nodes for the ::after pseudo-element.
-    if (is<DOM::Element>(dom_node) && layout_node->can_have_children()) {
+    if (is<DOM::Element>(dom_node) && layout_node->can_have_children() && !element_has_content_visibility_hidden) {
         auto& element = static_cast<DOM::Element&>(dom_node);
         push_parent(verify_cast<NodeWithStyle>(*layout_node));
         create_pseudo_element_if_needed(element, CSS::Selector::PseudoElement::Type::After, AppendOrPrepend::Append);

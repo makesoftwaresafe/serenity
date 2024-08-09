@@ -74,9 +74,13 @@ ErrorOr<void, ValidationError> Validator::validate(Module& module)
         return result;
     }
 
-    module.for_each_section_of_type<FunctionSection>([this, &result](FunctionSection const& section) {
-        if (result.is_error())
+    CodeSection const* code_section { nullptr };
+    module.for_each_section_of_type<CodeSection>([&](auto& section) { code_section = &section; });
+    module.for_each_section_of_type<FunctionSection>([&](FunctionSection const& section) {
+        if ((!code_section && !section.types().is_empty()) || (code_section && code_section->functions().size() != section.types().size())) {
+            result = Errors::invalid("FunctionSection"sv);
             return;
+        }
         m_context.functions.ensure_capacity(section.types().size() + m_context.functions.size());
         for (auto& index : section.types()) {
             if (m_context.types.size() > index.value()) {
@@ -124,15 +128,18 @@ ErrorOr<void, ValidationError> Validator::validate(Module& module)
     // - Exports
     auto scan_expression_for_function_indices = [&](auto& expression) {
         for (auto& instruction : expression.instructions()) {
-            if (instruction.opcode() == Instructions::ref_func)
-                m_context.references.set(instruction.arguments().template get<FunctionIndex>());
+            if (instruction.opcode() == Instructions::ref_func) {
+                auto index = instruction.arguments().template get<FunctionIndex>();
+                m_context.references->tree.insert(index.value(), index);
+            }
         }
     };
     module.for_each_section_of_type<ExportSection>([&](ExportSection const& section) {
         for (auto& export_ : section.entries()) {
             if (!export_.description().has<FunctionIndex>())
                 continue;
-            m_context.references.set(export_.description().get<FunctionIndex>());
+            auto index = export_.description().get<FunctionIndex>();
+            m_context.references->tree.insert(index.value(), index);
         }
     });
     module.for_each_section_of_type<ElementSection>([&](ElementSection const& section) {
@@ -1313,7 +1320,7 @@ VALIDATE_INSTRUCTION(ref_func)
     auto index = instruction.arguments().get<FunctionIndex>();
     TRY(validate(index));
 
-    if (!m_context.references.contains(index))
+    if (m_context.references->tree.find(index.value()) == nullptr)
         return Errors::invalid("function reference"sv);
 
     is_constant = true;
@@ -1938,6 +1945,13 @@ VALIDATE_INSTRUCTION(structured_end)
         return Errors::invalid("usage of structured end"sv);
 
     auto& last_frame = m_frames.last();
+
+    // If this is true, then the `if` had no else. In that case, validate that the
+    // empty else block produces the correct type.
+    if (last_frame.kind == FrameKind::If) {
+        bool is_constant = false;
+        TRY(validate(Instruction(Instructions::structured_else), stack, is_constant));
+    }
 
     auto& results = last_frame.type.results();
     for (size_t i = 1; i <= results.size(); ++i)
@@ -2840,7 +2854,7 @@ VALIDATE_INSTRUCTION(v128_load8_lane)
     constexpr auto max_lane = 128 / N;
     constexpr auto max_alignment = N / 8;
 
-    if (arg.lane > max_lane)
+    if (arg.lane >= max_lane)
         return Errors::out_of_bounds("lane index"sv, arg.lane, 0u, max_lane);
 
     TRY(validate(arg.memory.memory_index));
@@ -2899,7 +2913,7 @@ VALIDATE_INSTRUCTION(v128_load64_lane)
 
     TRY(validate(arg.memory.memory_index));
 
-    if (arg.memory.align > max_alignment)
+    if ((1 << arg.memory.align) > max_alignment)
         return Errors::out_of_bounds("memory op alignment"sv, 1 << arg.memory.align, 0u, max_alignment);
 
     return stack.take_and_put<ValueType::V128, ValueType::I32>(ValueType::V128);
@@ -2920,7 +2934,7 @@ VALIDATE_INSTRUCTION(v128_store8_lane)
     if ((1 << arg.memory.align) > max_alignment)
         return Errors::out_of_bounds("memory op alignment"sv, 1 << arg.memory.align, 0u, max_alignment);
 
-    return stack.take_and_put<ValueType::V128, ValueType::I32>(ValueType::V128);
+    return stack.take<ValueType::V128, ValueType::I32>();
 }
 
 VALIDATE_INSTRUCTION(v128_store16_lane)
@@ -2938,7 +2952,7 @@ VALIDATE_INSTRUCTION(v128_store16_lane)
     if ((1 << arg.memory.align) > max_alignment)
         return Errors::out_of_bounds("memory op alignment"sv, 1 << arg.memory.align, 0u, max_alignment);
 
-    return stack.take_and_put<ValueType::V128, ValueType::I32>(ValueType::V128);
+    return stack.take<ValueType::V128, ValueType::I32>();
 }
 
 VALIDATE_INSTRUCTION(v128_store32_lane)
@@ -2956,7 +2970,7 @@ VALIDATE_INSTRUCTION(v128_store32_lane)
     if ((1 << arg.memory.align) > max_alignment)
         return Errors::out_of_bounds("memory op alignment"sv, 1 << arg.memory.align, 0u, max_alignment);
 
-    return stack.take_and_put<ValueType::V128, ValueType::I32>(ValueType::V128);
+    return stack.take<ValueType::V128, ValueType::I32>();
 }
 
 VALIDATE_INSTRUCTION(v128_store64_lane)
@@ -2974,7 +2988,7 @@ VALIDATE_INSTRUCTION(v128_store64_lane)
     if ((1 << arg.memory.align) > max_alignment)
         return Errors::out_of_bounds("memory op alignment"sv, 1 << arg.memory.align, 0u, max_alignment);
 
-    return stack.take_and_put<ValueType::V128, ValueType::I32>(ValueType::V128);
+    return stack.take<ValueType::V128, ValueType::I32>();
 }
 
 VALIDATE_INSTRUCTION(v128_load32_zero)

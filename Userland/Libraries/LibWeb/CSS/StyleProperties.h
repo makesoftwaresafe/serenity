@@ -85,7 +85,8 @@ public:
         CSS::ContentData content_data;
         u32 final_quote_nesting_level { 0 };
     };
-    ContentDataAndQuoteNestingLevel content(u32 initial_quote_nesting_level) const;
+    ContentDataAndQuoteNestingLevel content(DOM::Element&, u32 initial_quote_nesting_level) const;
+    Optional<CSS::ContentVisibility> content_visibility() const;
     Optional<CSS::Cursor> cursor() const;
     Optional<CSS::WhiteSpace> white_space() const;
     Optional<CSS::LineStyle> line_style(CSS::PropertyID) const;
@@ -132,7 +133,6 @@ public:
     CSS::GridTrackPlacement grid_row_start() const;
     Optional<CSS::BorderCollapse> border_collapse() const;
     Vector<Vector<String>> grid_template_areas() const;
-    String grid_area() const;
     Optional<CSS::ObjectFit> object_fit() const;
     CSS::ObjectPosition object_position() const;
     Optional<CSS::TableLayout> table_layout() const;
@@ -164,7 +164,6 @@ public:
     }
 
     [[nodiscard]] CSSPixels compute_line_height(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const;
-    [[nodiscard]] CSSPixels compute_line_height(Layout::Node const&) const;
 
     [[nodiscard]] CSSPixels line_height() const { return *m_line_height; }
     void set_line_height(Badge<StyleComputer> const&, CSSPixels line_height) { m_line_height = line_height; }
@@ -178,6 +177,7 @@ public:
     int math_depth() const { return m_math_depth; }
 
     QuotesData quotes() const;
+    Vector<CounterData> counter_data(PropertyID) const;
 
     Optional<CSS::ScrollbarWidth> scrollbar_width() const;
 

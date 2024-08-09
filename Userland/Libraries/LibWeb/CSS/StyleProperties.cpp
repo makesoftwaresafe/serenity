@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021-2024, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,6 +11,8 @@
 #include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ContentStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CounterDefinitionsStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CounterStyleValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridAutoFlowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTemplateAreaStyleValue.h>
@@ -24,6 +26,7 @@
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RectStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ScrollbarGutterStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StringStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
@@ -174,7 +177,6 @@ NonnullRefPtr<Gfx::Font const> StyleProperties::font_fallback(bool monospace, bo
     return Platform::FontPlugin::the().default_font();
 }
 
-// FIXME: This implementation is almost identical to compute_line_height(Layout::Node) below. Maybe they can be combined somehow.
 CSSPixels StyleProperties::compute_line_height(CSSPixelRect const& viewport_rect, Length::FontMetrics const& font_metrics, Length::FontMetrics const& root_font_metrics) const
 {
     auto line_height = property(CSS::PropertyID::LineHeight);
@@ -216,49 +218,6 @@ CSSPixels StyleProperties::compute_line_height(CSSPixelRect const& viewport_rect
     }
 
     return font_metrics.line_height;
-}
-
-CSSPixels StyleProperties::compute_line_height(Layout::Node const& layout_node) const
-{
-    auto line_height = property(CSS::PropertyID::LineHeight);
-
-    if (line_height->is_identifier() && line_height->to_identifier() == ValueID::Normal)
-        return CSSPixels::nearest_value_for(layout_node.first_available_font().pixel_metrics().line_spacing());
-
-    if (line_height->is_length()) {
-        auto line_height_length = line_height->as_length().length();
-        if (!line_height_length.is_auto())
-            return line_height_length.to_px(layout_node);
-    }
-
-    if (line_height->is_number())
-        return Length(line_height->as_number().number(), Length::Type::Em).to_px(layout_node);
-
-    if (line_height->is_percentage()) {
-        // Percentages are relative to 1em. https://www.w3.org/TR/css-inline-3/#valdef-line-height-percentage
-        auto& percentage = line_height->as_percentage().percentage();
-        return Length(percentage.as_fraction(), Length::Type::Em).to_px(layout_node);
-    }
-
-    if (line_height->is_calculated()) {
-        if (line_height->as_calculated().resolves_to_number()) {
-            auto resolved = line_height->as_calculated().resolve_number();
-            if (!resolved.has_value()) {
-                dbgln("FIXME: Failed to resolve calc() line-height (number): {}", line_height->as_calculated().to_string());
-                return CSSPixels::nearest_value_for(layout_node.first_available_font().pixel_metrics().line_spacing());
-            }
-            return Length(resolved.value(), Length::Type::Em).to_px(layout_node);
-        }
-
-        auto resolved = line_height->as_calculated().resolve_length(layout_node);
-        if (!resolved.has_value()) {
-            dbgln("FIXME: Failed to resolve calc() line-height: {}", line_height->as_calculated().to_string());
-            return CSSPixels::nearest_value_for(layout_node.first_available_font().pixel_metrics().line_spacing());
-        }
-        return resolved->to_px(layout_node);
-    }
-
-    return CSSPixels::nearest_value_for(layout_node.first_available_font().pixel_metrics().line_spacing());
 }
 
 Optional<int> StyleProperties::z_index() const
@@ -689,7 +648,7 @@ Optional<CSS::Clear> StyleProperties::clear() const
     return value_id_to_clear(value->to_identifier());
 }
 
-StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 initial_quote_nesting_level) const
+StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(DOM::Element& element, u32 initial_quote_nesting_level) const
 {
     auto value = property(CSS::PropertyID::Content);
     auto quotes_data = quotes();
@@ -699,13 +658,13 @@ StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 in
     auto get_quote_string = [&](bool open, auto depth) {
         switch (quotes_data.type) {
         case QuotesData::Type::None:
-            return String {};
+            return FlyString {};
         case QuotesData::Type::Auto:
             // FIXME: "A typographically appropriate used value for quotes is automatically chosen by the UA
             //        based on the content language of the element and/or its parent."
             if (open)
-                return depth == 0 ? "“"_string : "‘"_string;
-            return depth == 0 ? "”"_string : "’"_string;
+                return depth == 0 ? "“"_fly_string : "‘"_fly_string;
+            return depth == 0 ? "”"_fly_string : "’"_fly_string;
         case QuotesData::Type::Specified:
             // If the depth is greater than the number of pairs, the last pair is repeated.
             auto& level = quotes_data.strings[min(depth, quotes_data.strings.size() - 1)];
@@ -752,8 +711,10 @@ StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 in
                     dbgln("`{}` is not supported in `content` (yet?)", item->to_string());
                     break;
                 }
+            } else if (item->is_counter()) {
+                builder.append(item->as_counter().resolve(element));
             } else {
-                // TODO: Implement counters, images, and other things.
+                // TODO: Implement images, and other things.
                 dbgln("`{}` is not supported in `content` (yet?)", item->to_string());
             }
         }
@@ -765,8 +726,10 @@ StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 in
             for (auto const& item : content_style_value.alt_text()->values()) {
                 if (item->is_string()) {
                     alt_text_builder.append(item->as_string().string_value());
+                } else if (item->is_counter()) {
+                    alt_text_builder.append(item->as_counter().resolve(element));
                 } else {
-                    // TODO: Implement counters
+                    dbgln("`{}` is not supported in `content` alt-text (yet?)", item->to_string());
                 }
             }
             content_data.alt_text = MUST(alt_text_builder.to_string());
@@ -785,6 +748,12 @@ StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 in
     }
 
     return { {}, quote_nesting_level };
+}
+
+Optional<CSS::ContentVisibility> StyleProperties::content_visibility() const
+{
+    auto value = property(CSS::PropertyID::ContentVisibility);
+    return value_id_to_content_visibility(value->to_identifier());
 }
 
 Optional<CSS::Cursor> StyleProperties::cursor() const
@@ -1040,12 +1009,6 @@ Vector<Vector<String>> StyleProperties::grid_template_areas() const
     return value->as_grid_template_area().grid_template_area();
 }
 
-String StyleProperties::grid_area() const
-{
-    auto value = property(CSS::PropertyID::GridArea);
-    return value->as_string().string_value();
-}
-
 Optional<CSS::ObjectFit> StyleProperties::object_fit() const
 {
     auto value = property(CSS::PropertyID::ObjectFit);
@@ -1134,6 +1097,42 @@ QuotesData StyleProperties::quotes() const
     }
 
     return InitialValues::quotes();
+}
+
+Vector<CounterData> StyleProperties::counter_data(PropertyID property_id) const
+{
+    auto value = property(property_id);
+
+    if (value->is_counter_definitions()) {
+        auto& counter_definitions = value->as_counter_definitions().counter_definitions();
+        Vector<CounterData> result;
+        for (auto& counter : counter_definitions) {
+            CounterData data {
+                .name = counter.name,
+                .is_reversed = counter.is_reversed,
+                .value = {},
+            };
+            if (counter.value) {
+                if (counter.value->is_integer()) {
+                    data.value = AK::clamp_to<i32>(counter.value->as_integer().integer());
+                } else if (counter.value->is_calculated()) {
+                    auto maybe_int = counter.value->as_calculated().resolve_integer();
+                    if (maybe_int.has_value())
+                        data.value = AK::clamp_to<i32>(*maybe_int);
+                } else {
+                    dbgln("Unimplemented type for {} integer value: '{}'", string_from_property_id(property_id), counter.value->to_string());
+                }
+            }
+            result.append(move(data));
+        }
+        return result;
+    }
+
+    if (value->to_identifier() == ValueID::None)
+        return {};
+
+    dbgln("Unhandled type for {} value: '{}'", string_from_property_id(property_id), value->to_string());
+    return {};
 }
 
 Optional<CSS::ScrollbarWidth> StyleProperties::scrollbar_width() const

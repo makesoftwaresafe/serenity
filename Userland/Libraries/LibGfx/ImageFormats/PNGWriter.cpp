@@ -15,8 +15,6 @@
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ImageFormats/PNGWriter.h>
 
-#pragma GCC diagnostic ignored "-Wpsabi"
-
 namespace Gfx {
 
 class PNGChunk {
@@ -33,7 +31,7 @@ public:
 
     ErrorOr<void> add_u8(u8);
 
-    ErrorOr<void> compress_and_add(ReadonlyBytes);
+    ErrorOr<void> compress_and_add(ReadonlyBytes, Compress::ZlibCompressionLevel);
     ErrorOr<void> add(ReadonlyBytes);
 
     ErrorOr<void> store_type();
@@ -73,9 +71,9 @@ u32 PNGChunk::crc()
     return crc;
 }
 
-ErrorOr<void> PNGChunk::compress_and_add(ReadonlyBytes uncompressed_bytes)
+ErrorOr<void> PNGChunk::compress_and_add(ReadonlyBytes uncompressed_bytes, Compress::ZlibCompressionLevel compression_level)
 {
-    return add(TRY(Compress::ZlibCompressor::compress_all(uncompressed_bytes, Compress::ZlibCompressionLevel::Best)));
+    return add(TRY(Compress::ZlibCompressor::compress_all(uncompressed_bytes, compression_level)));
 }
 
 ErrorOr<void> PNGChunk::add(ReadonlyBytes bytes)
@@ -127,7 +125,7 @@ ErrorOr<void> PNGWriter::add_IHDR_chunk(u32 width, u32 height, u8 bit_depth, PNG
     return {};
 }
 
-ErrorOr<void> PNGWriter::add_iCCP_chunk(ReadonlyBytes icc_data)
+ErrorOr<void> PNGWriter::add_iCCP_chunk(ReadonlyBytes icc_data, Compress::ZlibCompressionLevel compression_level)
 {
     // https://www.w3.org/TR/png/#11iCCP
     PNGChunk chunk { "iCCP"_string };
@@ -136,7 +134,7 @@ ErrorOr<void> PNGWriter::add_iCCP_chunk(ReadonlyBytes icc_data)
     TRY(chunk.add_u8(0)); // \0-terminate profile name
 
     TRY(chunk.add_u8(0)); // compression method deflate
-    TRY(chunk.compress_and_add(icc_data));
+    TRY(chunk.compress_and_add(icc_data, compression_level));
 
     TRY(add_chunk(chunk));
     return {};
@@ -167,7 +165,8 @@ union [[gnu::packed]] Pixel {
 };
 static_assert(AssertSize<Pixel, 4>());
 
-ErrorOr<void> PNGWriter::add_IDAT_chunk(Gfx::Bitmap const& bitmap)
+template<bool include_alpha>
+ErrorOr<void> PNGWriter::add_IDAT_chunk(Gfx::Bitmap const& bitmap, Compress::ZlibCompressionLevel compression_level)
 {
     PNGChunk png_chunk { "IDAT"_string };
     TRY(png_chunk.reserve(bitmap.size_in_bytes()));
@@ -184,22 +183,25 @@ ErrorOr<void> PNGWriter::add_IDAT_chunk(Gfx::Bitmap const& bitmap)
         struct Filter {
             PNG::FilterType type;
             ByteBuffer buffer {};
-            int sum = 0;
-
-            ErrorOr<void> append(u8 byte)
-            {
-                TRY(buffer.try_append(byte));
-                sum += static_cast<i8>(byte);
-                return {};
-            }
+            AK::SIMD::i32x4 sum { 0, 0, 0, 0 };
 
             ErrorOr<void> append(AK::SIMD::u8x4 simd)
             {
-                TRY(append(simd[0]));
-                TRY(append(simd[1]));
-                TRY(append(simd[2]));
-                TRY(append(simd[3]));
+                TRY(buffer.try_append(simd[0]));
+                TRY(buffer.try_append(simd[1]));
+                TRY(buffer.try_append(simd[2]));
+                if constexpr (include_alpha)
+                    TRY(buffer.try_append(simd[3]));
+                sum += AK::SIMD::simd_cast<AK::SIMD::i32x4>(AK::SIMD::simd_cast<AK::SIMD::i8x4>(simd));
                 return {};
+            }
+
+            i32 sum_of_signed_values() const
+            {
+                i32 result = sum[0] + sum[1] + sum[2];
+                if constexpr (include_alpha)
+                    result += sum[3];
+                return result;
             }
         };
 
@@ -232,8 +234,8 @@ ErrorOr<void> PNGWriter::add_IDAT_chunk(Gfx::Bitmap const& bitmap)
             TRY(up_filter.append(pixel - pixel_y_minus_1));
 
             // The sum Orig(a) + Orig(b) shall be performed without overflow (using at least nine-bit arithmetic).
-            auto sum = AK::SIMD::to_u16x4(pixel_x_minus_1) + AK::SIMD::to_u16x4(pixel_y_minus_1);
-            auto average = AK::SIMD::to_u8x4(sum / 2);
+            auto sum = AK::SIMD::simd_cast<AK::SIMD::u16x4>(pixel_x_minus_1) + AK::SIMD::simd_cast<AK::SIMD::u16x4>(pixel_y_minus_1);
+            auto average = AK::SIMD::simd_cast<AK::SIMD::u8x4>(sum / 2);
             TRY(average_filter.append(pixel - average));
 
             TRY(paeth_filter.append(pixel - PNG::paeth_predictor(pixel_x_minus_1, pixel_y_minus_1, pixel_xy_minus_1)));
@@ -251,32 +253,47 @@ ErrorOr<void> PNGWriter::add_IDAT_chunk(Gfx::Bitmap const& bitmap)
         // compute the output scanline using all five filters, and select the filter that gives the smallest sum of absolute values of outputs.
         // (Consider the output bytes as signed differences for this test.)
         Filter& best_filter = none_filter;
-        if (abs(best_filter.sum) > abs(sub_filter.sum))
+        if (abs(best_filter.sum_of_signed_values()) > abs(sub_filter.sum_of_signed_values()))
             best_filter = sub_filter;
-        if (abs(best_filter.sum) > abs(up_filter.sum))
+        if (abs(best_filter.sum_of_signed_values()) > abs(up_filter.sum_of_signed_values()))
             best_filter = up_filter;
-        if (abs(best_filter.sum) > abs(average_filter.sum))
+        if (abs(best_filter.sum_of_signed_values()) > abs(average_filter.sum_of_signed_values()))
             best_filter = average_filter;
-        if (abs(best_filter.sum) > abs(paeth_filter.sum))
+        if (abs(best_filter.sum_of_signed_values()) > abs(paeth_filter.sum_of_signed_values()))
             best_filter = paeth_filter;
 
         TRY(uncompressed_block_data.try_append(to_underlying(best_filter.type)));
         TRY(uncompressed_block_data.try_append(best_filter.buffer));
     }
 
-    TRY(png_chunk.compress_and_add(uncompressed_block_data));
+    TRY(png_chunk.compress_and_add(uncompressed_block_data, compression_level));
     TRY(add_chunk(png_chunk));
     return {};
 }
 
+static bool bitmap_has_transparency(Bitmap const& bitmap)
+{
+    for (auto pixel : bitmap) {
+        if (Color::from_argb(pixel).alpha() != 255)
+            return true;
+    }
+    return false;
+}
+
 ErrorOr<ByteBuffer> PNGWriter::encode(Gfx::Bitmap const& bitmap, Options options)
 {
+    bool has_transparency = bitmap_has_transparency(bitmap);
+
     PNGWriter writer;
     TRY(writer.add_png_header());
-    TRY(writer.add_IHDR_chunk(bitmap.width(), bitmap.height(), 8, PNG::ColorType::TruecolorWithAlpha, 0, 0, 0));
+    auto color_type = has_transparency ? PNG::ColorType::TruecolorWithAlpha : PNG::ColorType::Truecolor;
+    TRY(writer.add_IHDR_chunk(bitmap.width(), bitmap.height(), 8, color_type, 0, 0, 0));
     if (options.icc_data.has_value())
-        TRY(writer.add_iCCP_chunk(options.icc_data.value()));
-    TRY(writer.add_IDAT_chunk(bitmap));
+        TRY(writer.add_iCCP_chunk(options.icc_data.value(), options.compression_level));
+    if (has_transparency)
+        TRY(writer.add_IDAT_chunk<true>(bitmap, options.compression_level));
+    else
+        TRY(writer.add_IDAT_chunk<false>(bitmap, options.compression_level));
     TRY(writer.add_IEND_chunk());
     return ByteBuffer::copy(writer.m_data);
 }

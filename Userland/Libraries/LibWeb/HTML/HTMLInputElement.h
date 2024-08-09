@@ -168,6 +168,8 @@ public:
     // https://html.spec.whatwg.org/multipage/forms.html#concept-submit-button
     virtual bool is_submit_button() const override;
 
+    bool is_single_line() const;
+
     virtual void reset_algorithm() override;
 
     virtual void form_associated_element_was_inserted() override;
@@ -210,6 +212,7 @@ private:
 
     // ^DOM::Element
     virtual i32 default_tab_index_value() const override;
+    virtual void computed_css_values_changed() override;
 
     // https://html.spec.whatwg.org/multipage/input.html#image-button-state-(type=image):dimension-attributes
     virtual bool supports_dimension_attributes() const override { return type_state() == TypeAttributeState::ImageButton; }
@@ -255,6 +258,8 @@ private:
     void handle_readonly_attribute(Optional<String> const& value);
     WebIDL::ExceptionOr<void> handle_src_attribute(String const& value);
 
+    void user_interaction_did_change_input_value();
+
     // https://html.spec.whatwg.org/multipage/input.html#value-sanitization-algorithm
     String value_sanitization_algorithm(String const&) const;
 
@@ -282,8 +287,9 @@ private:
     JS::GCPtr<DOM::Element> m_file_button;
     JS::GCPtr<DOM::Element> m_file_label;
 
-    void update_slider_thumb_element();
+    void update_slider_shadow_tree_elements();
     JS::GCPtr<DOM::Element> m_slider_thumb;
+    JS::GCPtr<DOM::Element> m_slider_progress_element;
 
     JS::GCPtr<DecodedImageData> image_data() const;
     JS::GCPtr<SharedImageRequest> m_image_request;

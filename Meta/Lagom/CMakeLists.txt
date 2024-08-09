@@ -466,6 +466,7 @@ if (BUILD_LAGOM)
         Manual
         Markdown
         PDF
+        Media
         Protocol
         Regex
         RIFF
@@ -475,7 +476,6 @@ if (BUILD_LAGOM)
         TextCodec
         Threading
         TLS
-        Video
         Wasm
         WebSocket
         XML
@@ -571,8 +571,8 @@ if (BUILD_LAGOM)
         if (EMSCRIPTEN)
             lagom_utility(libjs SOURCES Wasm/js_repl.cpp LIBS LibJS LibLocale LibTimeZone LibUnicode)
             target_link_options(libjs PRIVATE
-                    -sEXPORTED_FUNCTIONS=_initialize_repl,_execute
-                    -sEXPORTED_RUNTIME_METHODS=allocateUTF8
+                    -sEXPORTED_FUNCTIONS=_initialize_repl,_execute,_free
+                    -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8
                     -sERROR_ON_UNDEFINED_SYMBOLS=0
                     -sENVIRONMENT=web)
         endif()
@@ -645,14 +645,14 @@ if (BUILD_LAGOM)
             LibMarkdown
             LibPDF
             LibSQL
-            LibTest
+            LibMedia
+        LibTest
             LibTextCodec
             LibTTF
             LibTimeZone
             LibUnicode
             LibURL
-            LibVideo
-            LibXML
+                LibXML
         )
         if (ENABLE_LAGOM_LIBWEB)
             list(APPEND TEST_DIRECTORIES LibWeb)

@@ -246,11 +246,12 @@ bool MailWidget::is_supported_alternative(Alternative const& alternative) const
 
 void MailWidget::selected_mailbox(GUI::ModelIndex const& index)
 {
+    if (!index.is_valid() || index == m_mailbox_index)
+        return;
+    m_mailbox_index = index;
+
     m_mailbox_model = InboxModel::create({});
     m_individual_mailbox_view->set_model(m_mailbox_model);
-
-    if (!index.is_valid())
-        return;
 
     auto& base_node = *static_cast<BaseNode*>(index.internal_data());
 
@@ -489,6 +490,7 @@ void MailWidget::selected_email_to_load(GUI::ModelIndex const& index)
     if (selected_alternative_encoding.equals_ignoring_ascii_case("7bit"sv) || selected_alternative_encoding.equals_ignoring_ascii_case("8bit"sv)) {
         decoded_data = encoded_data;
     } else if (selected_alternative_encoding.equals_ignoring_ascii_case("base64"sv)) {
+        encoded_data = encoded_data.replace("\r"sv, ""sv).replace("\n"sv, ""sv);
         auto decoded_base64 = decode_base64(encoded_data);
         if (!decoded_base64.is_error())
             decoded_data = decoded_base64.release_value().span();

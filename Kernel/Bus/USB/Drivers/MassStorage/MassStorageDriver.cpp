@@ -102,9 +102,9 @@ ErrorOr<void> MassStorageDriver::initialise_bulk_only_device(USB::Device& device
         dmesgln("SCSI/BBB: WARNING: USB Mass Storage Device supports multiple LUNs ({}) only targetting first LUN", max_luns);
 
     u8 in_pipe_address = 0xff;
-    u8 in_max_packet_size;
+    u16 in_max_packet_size;
     u8 out_pipe_address = 0xff;
-    u8 out_max_packet_size;
+    u16 out_max_packet_size;
 
     if (interface.descriptor().number_of_endpoints < 2) {
         dmesgln("SCSI/BBB: Interface does not provide enough endpoints for advertised Bulk-only transfer protocol; Rejecting");
@@ -128,8 +128,8 @@ ErrorOr<void> MassStorageDriver::initialise_bulk_only_device(USB::Device& device
         return ENOTSUP;
     }
 
-    auto in_pipe = TRY(BulkInPipe::create(device.controller(), in_pipe_address, in_max_packet_size, device.address()));
-    auto out_pipe = TRY(BulkOutPipe::create(device.controller(), out_pipe_address, out_max_packet_size, device.address()));
+    auto in_pipe = TRY(BulkInPipe::create(device.controller(), device, in_pipe_address, in_max_packet_size));
+    auto out_pipe = TRY(BulkOutPipe::create(device.controller(), device, out_pipe_address, out_max_packet_size));
 
     CommandBlockWrapper command_block {};
     command_block.set_command(SCSI::ReadCapacity10 {});

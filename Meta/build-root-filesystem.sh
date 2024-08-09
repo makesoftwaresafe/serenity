@@ -137,7 +137,7 @@ chmod 755 mnt/res/devel/templates/*.postcreate
 echo "done"
 
 printf "creating initial filesystem structure... "
-for dir in bin etc proc mnt tmp boot mod var/run usr/local usr/bin; do
+for dir in bin etc proc mnt tmp boot www mod var/run usr/local usr/Ports usr/bin; do
     mkdir -p mnt/$dir
 done
 chmod 700 mnt/boot
@@ -203,11 +203,12 @@ echo "done"
 
 printf "installing shortcuts... "
 ln -sf /bin/PackageManager mnt/bin/pkg
+ln -sf /bin/RunContainer mnt/bin/runc
 ln -sf Shell mnt/bin/sh
 ln -sf test mnt/bin/[
 ln -sf less mnt/bin/more
 ln -sf /bin/env mnt/usr/bin/env
-ln -sf /bin/SystemServer mnt/init
+ln -sf /bin/init mnt/init
 echo "done"
 
 printf "installing 'checksum' variants... "
