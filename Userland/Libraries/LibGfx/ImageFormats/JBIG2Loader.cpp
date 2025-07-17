@@ -360,34 +360,31 @@ enum class CombinationOperator {
 
 static void composite_bitbuffer(BitBuffer& out, BitBuffer const& bitmap, Gfx::IntPoint position, CombinationOperator operator_)
 {
+    static constexpr auto combine = [](bool dst, bool src, CombinationOperator op) -> bool {
+        switch (op) {
+        case CombinationOperator::Or:
+            return dst || src;
+        case CombinationOperator::And:
+            return dst && src;
+        case CombinationOperator::Xor:
+            return dst ^ src;
+        case CombinationOperator::XNor:
+            return !(dst ^ src);
+        case CombinationOperator::Replace:
+            return src;
+        }
+        VERIFY_NOT_REACHED();
+    };
+
     IntRect bitmap_rect { position, { bitmap.width(), bitmap.height() } };
     IntRect out_rect { { 0, 0 }, { out.width(), out.height() } };
-
     IntRect clip_rect = bitmap_rect.intersected(out_rect);
-    if (clip_rect.is_empty())
-        return;
 
     for (int y = clip_rect.top(); y < clip_rect.bottom(); ++y) {
         for (int x = clip_rect.left(); x < clip_rect.right(); ++x) {
-            bool bit = bitmap.get_bit(x - position.x(), y - position.y());
-            switch (operator_) {
-            case CombinationOperator::Or:
-                bit = bit || out.get_bit(x, y);
-                break;
-            case CombinationOperator::And:
-                bit = bit && out.get_bit(x, y);
-                break;
-            case CombinationOperator::Xor:
-                bit = bit ^ out.get_bit(x, y);
-                break;
-            case CombinationOperator::XNor:
-                bit = !(bit ^ out.get_bit(x, y));
-                break;
-            case CombinationOperator::Replace:
-                // Nothing to do.
-                break;
-            }
-            out.set_bit(x, y, bit);
+            bool src_bit = bitmap.get_bit(x - position.x(), y - position.y());
+            bool dst_bit = out.get_bit(x, y);
+            out.set_bit(x, y, combine(dst_bit, src_bit, operator_));
         }
     }
 }
@@ -1680,12 +1677,7 @@ static ErrorOr<Vector<u64>> grayscale_image_decoding_procedure(GrayscaleInputPar
 
         // "b) For each pixel (x, y) in GSPLANES[J], set:
         //     GSPLANES[J][x, y] = GSPLANES[J + 1][x, y] XOR GSPLANES[J][x, y]"
-        for (u32 y = 0; y < inputs.height; ++y) {
-            for (u32 x = 0; x < inputs.width; ++x) {
-                bool bit = bitplanes[j + 1]->get_bit(x, y) ^ bitplanes[j]->get_bit(x, y);
-                bitplanes[j]->set_bit(x, y, bit);
-            }
-        }
+        composite_bitbuffer(*bitplanes[j], *bitplanes[j + 1], { 0, 0 }, CombinationOperator::Xor);
 
         // "c) Set J = J – 1."
         j = j - 1;
